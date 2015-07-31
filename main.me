@@ -1,0 +1,78 @@
+/*
+    main.me -- MakeMe for the Multithreaded Portable Runtime (MPR)
+ */
+
+Me.load({
+    makeme: '>=0.9.0',
+
+    plugins: [ 'installs' ],
+
+    blend: [
+        'src/*/*.me',
+        'osdep',
+    ],
+
+    configure: {
+        requires:  [ 'osdep' ],
+    },
+
+    settings: {
+        watchdog: {
+            name: 'watchdog',
+        }
+        integrate: true,
+        prefixes: 'install-prefixes',
+    },
+
+    targets: {
+        watchdog: {
+            type: 'exe',
+            rule: 'gui',
+            depends: [ 'libmpr' ],
+            sources: 'src/watchdog.c',
+        },
+
+        package: {
+            depends: ['packagePak'],
+        },
+
+        packageSource: {},
+
+        projects: {
+            action: `genProjects('')`,
+        },
+
+        mine: {
+            action: "genProjects('', 'mine', Config.OS + '-' + Config.CPU)",
+        },
+    },
+
+    manifest: {
+        packages: {
+            pak: {
+                inherit:    'package-manifest',
+                prefixes:   [ 'src'],
+                formats:    [ 'tar' ],
+                sets:       [ 'pak' ],
+            },
+        },
+        sets: { 
+            pak: [
+                {   
+                    from:       'src/dist.me', 
+                    to:         '${src}/dist/watchdog.me',
+
+                },{
+                    from:    [ 'src/watchdog.c' ], 
+                    to:      '${src}/dist/',
+                    flatten: true,
+
+                },{
+                    from:       'doc/contents/man/*.1',
+                    to:         '${src}/doc/contents/man/',
+                    relative:   'doc/contents/man',
+                },
+            ],
+        },
+	},
+})

@@ -1,0 +1,52 @@
+/*
+    mpr.me -- MakeMe for the MPR
+ */
+
+Me.load({
+    blend: [ '?ssl' ],
+
+    targets: {
+        mpr: {
+            configurable: true,
+            depends: [ 'libmpr' ],
+            uses:    [ 'ssl' ],
+        },
+
+        libmpr: {
+            type: 'lib',
+            depends: [ 'osdep' ],
+            sources: [ 'mprLib.c' ],
+            headers: [ '*.h' ],
+        },
+
+//UNUSED        libmprssl: {
+//UNUSED            type: 'lib',
+//UNUSED            depends: [ 'libmpr', 'ssl' ],
+//UNUSED            sources: [ 'mprSsl.c' ],
+//UNUSED            scripts: { 
+//UNUSED                postresolve: `if (me.platform.os == 'macosx') { 
+//UNUSED                    TARGET.compiler.push('-Wno-deprecated-declarations') 
+//UNUSED                }`
+//UNUSED            }
+//UNUSED        },
+//UNUSED
+//UNUSED        manager: {
+//UNUSED            enable: 'me.settings.mpr && me.settings.mpr.manager',
+//UNUSED            type: 'exe',
+//UNUSED            path: '${BIN}/${settings.mpr.manager}${EXE}'
+//UNUSED            rule: 'gui',
+//UNUSED            depends: [ 'libmpr' ],
+//UNUSED            sources: [ 'manager.c' ],
+//UNUSED            scripts: { prebuild: "if (me.settings.mpr) { me.settings.mpr.manager ||= 'manager'}" },
+//UNUSED        },
+//UNUSED
+//UNUSED        makerom: {
+//UNUSED            type: 'exe',
+//UNUSED            goals: [],
+//UNUSED            depends: [ 'libmpr', ],
+//UNUSED            sources: ['makerom.c'],
+//UNUSED            platforms: [ 'local' ],
+//UNUSED            generate: false,
+//UNUSED        },
+	},
+})
