@@ -1192,11 +1192,11 @@ static void markAndSweep()
     static int warnOnce = 0;
 
     if (!pauseThreads()) {
-        if (!pauseGC && warnOnce == 0 && !mprGetDebugMode()) {
+        if (!pauseGC && warnOnce == 0 && !mprGetDebugMode() && !mprIsStopping()) {
             warnOnce++;
-            mprLog("error mpr memory", 5, "GC synchronization timed out, some threads did not yield.");
-            mprLog("error mpr memory", 5, "This can be caused by a thread doing a long running operation and not first calling mprYield.");
-            mprLog("error mpr memory", 5, "If debugging, run the process with -D to enable debug mode.");
+            mprLog("error mpr memory", 6, "GC synchronization timed out, some threads did not yield.");
+            mprLog("error mpr memory", 6, "This can be caused by a thread doing a long running operation and not first calling mprYield.");
+            mprLog("error mpr memory", 6, "If debugging, run the process with -D to enable debug mode.");
         }
         resumeThreads(YIELDED_THREADS | WAITING_THREADS);
         return;
@@ -1649,7 +1649,7 @@ PUBLIC int mprCreateEventOutside(MprDispatcher *dispatcher, cchar *name, void *p
         mprNap(0);
         mprAtomicBarrier();
     }
-    if ((op = mprAlloc(sizeof(OutsideEvent))) == 0) {
+    if ((op = mprAllocZeroed(sizeof(OutsideEvent))) == 0) {
         return MPR_ERR_MEMORY;
     }
     op->proc = proc;
@@ -2320,7 +2320,7 @@ PUBLIC uint64 mprGetCPU()
             ulong utime, stime;
             buf[nbytes] = '\0';
             sscanf(buf, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &utime, &stime);
-            ticks = (utime + stime) * MPR_TICKS_PER_SEC / sysconf(_SC_CLK_TCK);
+            ticks = (utime + stime) * TPS / sysconf(_SC_CLK_TCK);
         }
     }
 #elif MACOSX
@@ -2328,8 +2328,8 @@ PUBLIC uint64 mprGetCPU()
     mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t) &info, &count) == KERN_SUCCESS) {
         uint64 utime, stime;
-        utime = info.user_time.seconds * MPR_TICKS_PER_SEC + info.user_time.microseconds / 1000;
-        stime = info.system_time.seconds * MPR_TICKS_PER_SEC + info.system_time.microseconds / 1000;
+        utime = info.user_time.seconds * TPS + info.user_time.microseconds / 1000;
+        stime = info.system_time.seconds * TPS + info.system_time.microseconds / 1000;
         ticks = utime + stime;
     }
 #endif
@@ -2808,7 +2808,7 @@ static void shutdownMonitor(void *data, MprEvent *event)
             }
         }
     } else {
-        mprLog("info mpr", 2, "Waiting for requests to complete, %lld secs remaining ...", remaining / MPR_TICKS_PER_SEC);
+        mprLog("info mpr", 2, "Waiting for requests to complete, %lld secs remaining ...", remaining / TPS);
         mprRescheduleEvent(event, 1000);
     }
 }
@@ -4886,8 +4886,8 @@ typedef struct CacheItem
     int64           version;
 } CacheItem;
 
-#define CACHE_TIMER_PERIOD      (60 * MPR_TICKS_PER_SEC)
-#define CACHE_LIFESPAN          (86400 * MPR_TICKS_PER_SEC)
+#define CACHE_TIMER_PERIOD      (60 * TPS)
+#define CACHE_LIFESPAN          (86400 * TPS)
 #define CACHE_HASH_SIZE         257
 
 /*********************************** Forwards *********************************/
@@ -5344,7 +5344,7 @@ static void pruneCache(MprCache *cache, MprEvent *event)
             if (excessKeys < 0) {
                 excessKeys = 0;
             }
-            factor = 5 * 60 * MPR_TICKS_PER_SEC; 
+            factor = 5 * 60 * TPS; 
             when += factor;
             while (excessKeys > 0 || cache->usedMem > cache->maxMem) {
                 for (kp = 0; (kp = mprGetNextKey(cache->store, kp)) != 0; ) {
@@ -6258,6 +6258,10 @@ PUBLIC int mprWaitForCmd(MprCmd *cmd, MprTicks timeout)
             break;
         }
         delay = (cmd->eofCount >= cmd->requiredEof) ? 10 : remaining;
+        if (!MPR->eventing) {
+            mprServiceEvents(delay, MPR_SERVICE_NO_BLOCK);
+            delay = 0;
+        }
         mprWaitForEvent(cmd->dispatcher, delay, dispatcherMark);
         remaining = (expires - mprGetTicks());
         dispatcherMark = mprGetEventMark(cmd->dispatcher);
@@ -6343,7 +6347,6 @@ static void reapCmd(MprCmd *cmd, bool finalizing)
                 cmd->eofCount, cmd->requiredEof);
         if (cmd->callback) {
             (cmd->callback)(cmd, -1, cmd->callbackData);
-            /* WARNING - this above call may invoke httpPump and complete the request. HttpConn.tx may be null */
         }
     }
 }
@@ -6866,11 +6869,11 @@ static int makeChannel(MprCmd *cmd, int index)
         mprLog("error mpr cmd", 0, "Cannot create stdio pipes %s. Err %d", pipeName, mprGetOsError());
         return MPR_ERR_CANT_CREATE;
     }
-    readFd = (int) (int64) _open_osfhandle((long) readHandle, 0);
+    readFd = _open_osfhandle((intptr_t) readHandle, 0);
 
     att = (index == MPR_CMD_STDIN) ? &serverAtt: &clientAtt;
     writeHandle = CreateFile(wide(pipeName), GENERIC_WRITE, 0, att, OPEN_EXISTING, openMode, 0);
-    writeFd = (int) _open_osfhandle((long) writeHandle, 0);
+    writeFd = _open_osfhandle((intptr_t) writeHandle, 0);
 
     if (readFd < 0 || writeFd < 0) {
         mprLog("error mpr cmd", 0, "Cannot create stdio pipes %s. Err %d", pipeName, mprGetOsError());
@@ -7303,8 +7306,14 @@ PUBLIC int mprWaitForCond(MprCond *cp, MprTicks timeout)
      */
     rc = 0;
     if (timeout >= 0) {
+        if (timeout > MAXINT) {
+            timeout = MAXINT;
+        }
         now = mprGetTicks();
         expire = now + timeout;
+        if (expire < 0) {
+            expire = MPR_MAX_TIMEOUT;
+        }
 #if ME_UNIX_LIKE
         gettimeofday(&current, NULL);
         usec = current.tv_usec + ((int) (timeout % 1000)) * 1000;
@@ -9794,6 +9803,9 @@ PUBLIC int mprWaitForEvent(MprDispatcher *dispatcher, MprTicks timeout, int64 ma
     es = MPR->eventService;
     es->now = mprGetTicks();
     expires = timeout < 0 ? MPR_MAX_TIMEOUT : (es->now + timeout);
+    if (expires < 0) {
+        expires = MPR_MAX_TIMEOUT;
+    }
     delay = expires - es->now;
 
     lock(es);
@@ -10010,6 +10022,9 @@ static int dispatchEvents(MprDispatcher *dispatcher)
     MprOsThread         priorOwner;
     int                 count;
 
+    if (mprIsStopped()) {
+        return 0;
+    }
     assert(isRunning(dispatcher));
     es = dispatcher->service;
 
@@ -11764,24 +11779,23 @@ PUBLIC ssize mprWriteFile(MprFile *file, cvoid *buf, ssize count)
 
     fs = file->fileSystem;
     bp = file->buf;
-    if (bp == 0) {
-        if ((written = fs->writeFile(file, buf, count)) < 0) {
-            return written;
-        }
-    } else {
-        written = 0;
-        while (count > 0) {
-            bytes = mprPutBlockToBuf(bp, buf, count);
-            if (bytes < 0) {
+    written = 0;
+    while (count > 0) {
+        if (bp == 0) {
+            if ((bytes = fs->writeFile(file, buf, count)) < 0) {
+                return bytes;
+            }
+        } else {
+            if ((bytes = mprPutBlockToBuf(bp, buf, count)) < 0) {
                 return bytes;
             } 
             if (bytes != count) {
                 mprFlushFile(file);
             }
-            count -= bytes;
-            written += bytes;
-            buf = (char*) buf + bytes;
         }
+        count -= bytes;
+        written += bytes;
+        buf = (char*) buf + bytes;
     }
     file->pos += (MprOff) written;
     if (file->pos > file->size) {
@@ -12636,7 +12650,6 @@ static void adoptChildren(MprJson *obj, MprJson *other);
 static void appendItem(MprJson *obj, MprJson *child);
 static void appendProperty(MprJson *obj, MprJson *child);
 static int checkBlockCallback(MprJsonParser *parser, cchar *name, bool leave);
-static void formatValue(MprBuf *buf, MprJson *obj, int flags);
 static int gettok(MprJsonParser *parser);
 static MprJson *jsonParse(MprJsonParser *parser, MprJson *obj);
 static void jsonErrorCallback(MprJsonParser *parser, cchar *msg);
@@ -12960,7 +12973,7 @@ static int gettok(MprJsonParser *parser)
 {
     cchar   *cp, *value;
     ssize   len;
-    int     c;
+    int     c, d, i, val;
 
     assert(parser);
     assert(parser->input);
@@ -12985,6 +12998,7 @@ static int gettok(MprJsonParser *parser)
                 break;
             case ' ':
             case '\t':
+            case '\r':
                 break;
             case '\n':
                 parser->lineNumber++;
@@ -13028,16 +13042,60 @@ static int gettok(MprJsonParser *parser)
 
             case '"':
             case '\'':
+                /*
+                    Quoted strings: names or values
+                    This parser is tolerant of embedded, unquoted control characters
+                 */
                 if (parser->state == MPR_JSON_STATE_NAME || parser->state == MPR_JSON_STATE_VALUE) {
                     for (cp = parser->input; *cp; cp++) {
                         if (*cp == '\\' && cp[1]) {
                             cp++;
+                            if (*cp == '\\') {
+                                mprPutCharToBuf(parser->buf, '\\');
+                            } else if (*cp == '\'') {
+                                mprPutCharToBuf(parser->buf, '\'');
+                            } else if (*cp == '"') {
+                                mprPutCharToBuf(parser->buf, '"');
+                            } else if (*cp == '/') {
+                                mprPutCharToBuf(parser->buf, '/');
+                            } else if (*cp == '"') {
+                                mprPutCharToBuf(parser->buf, '"');
+                            } else if (*cp == 'b') {
+                                mprPutCharToBuf(parser->buf, '\b');
+                            } else if (*cp == 'f') {
+                                mprPutCharToBuf(parser->buf, '\f');
+                            } else if (*cp == 'n') {
+                                mprPutCharToBuf(parser->buf, '\n');
+                            } else if (*cp == 'r') {
+                                mprPutCharToBuf(parser->buf, '\r');
+                            } else if (*cp == 't') {
+                                mprPutCharToBuf(parser->buf, '\t');
+                            } else if (*cp == 'u') {
+                                for (i = val = 0, ++cp; i < 4 && *cp; i++) {
+                                    d = tolower((uchar) *cp);
+                                    if (isdigit((uchar) d)) {
+                                        val = (val * 16) + d - '0';
+                                    } else if (d >= 'a' && d <= 'f') {
+                                        val = (val * 16) + d - 'a' + 10;
+                                    } else {
+                                        mprSetJsonError(parser, "Unexpected hex characters");
+                                        break;
+                                    }
+                                    cp++;
+                                }
+                                mprPutCharToBuf(parser->buf, val);
+                                cp--;
+                            } else {
+                                mprSetJsonError(parser, "Unexpected input");
+                                break;
+                            }
                         } else if (*cp == c) {
                             parser->tokid = JTOK_STRING;
                             parser->input = cp + 1;
                             break;
+                        } else {
+                            mprPutCharToBuf(parser->buf, *cp);
                         }
-                        mprPutCharToBuf(parser->buf, *cp);
                     }
                     if (*cp != c) {
                         mprSetJsonError(parser, "Missing closing quote");
@@ -13054,21 +13112,16 @@ static int gettok(MprJsonParser *parser)
                         /* Allow unquoted names */
                         for (cp = parser->input; *cp; cp++) {
                             c = *cp;
-                            if (c == '\\' && cp[1]) {
-                                if (isxdigit((uchar) cp[1]) && isxdigit((uchar) cp[2]) && 
-                                    isxdigit((uchar) cp[3]) && isxdigit((uchar) cp[4])) {
-                                    c = (int) stoiradix(cp, 16, NULL);
-                                    cp += 3;
-                                } else {
-                                    c = *cp++;
-                                }
-                            } else if (isspace((uchar) c) || c == ':') {
+                            if (isspace((uchar) c) || c == ':') {
                                 break;
                             }
                             mprPutCharToBuf(parser->buf, c);
                         }
                         parser->tokid = JTOK_STRING;
                         parser->input = cp;
+
+                    } else {
+                        mprSetJsonError(parser, "Unexpected input");
                     }
 
                 } else if (parser->state == MPR_JSON_STATE_VALUE) {
@@ -13086,11 +13139,11 @@ static int gettok(MprJsonParser *parser)
                         parser->tokid = JTOK_NULL;
                     } else if (scaselessmatch(value, "true")) {
                         parser->tokid = JTOK_TRUE;
-                    } else if (scaselessmatch(value, "undefined")) {
+                    } else if (scaselessmatch(value, "undefined") && parser->tolerant) {
                         parser->tokid = JTOK_UNDEFINED;
                     } else if (sfnumber(value)) {
                         parser->tokid = JTOK_NUMBER;
-                    } else if (*value == '/' && value[slen(value) - 1] == '/') {
+                    } else if (*value == '/' && value[slen(value) - 1] == '/' && parser->tolerant) {
                         parser->tokid = JTOK_REGEXP;
                     } else {
                         parser->tokid = JTOK_STRING;
@@ -13116,10 +13169,9 @@ static int gettok(MprJsonParser *parser)
 static char *objToString(MprBuf *buf, MprJson *obj, int indent, int flags)
 {
     MprJson  *child;
-    int     quotes, pretty, index;
+    int     pretty, index;
 
     pretty = flags & MPR_JSON_PRETTY;
-    quotes = flags & MPR_JSON_QUOTES;
 
     if (obj->type & MPR_JSON_ARRAY) {
         mprPutCharToBuf(buf, '[');
@@ -13143,9 +13195,7 @@ static char *objToString(MprBuf *buf, MprJson *obj, int indent, int flags)
         if (pretty) mprPutCharToBuf(buf, '\n');
         for (ITERATE_JSON(obj, child, index)) {
             if (pretty) spaces(buf, indent);
-            if (quotes) mprPutCharToBuf(buf, '"');
-            mprPutStringToBuf(buf, child->name);
-            if (quotes) mprPutCharToBuf(buf, '"');
+            mprFormatJsonName(buf, child->name, flags);
             if (pretty) {
                 mprPutStringToBuf(buf, ": ");
             } else {
@@ -13161,14 +13211,14 @@ static char *objToString(MprBuf *buf, MprJson *obj, int indent, int flags)
         mprPutCharToBuf(buf, '}');
         
     } else {
-        formatValue(buf, obj, flags);
+        mprFormatJsonValue(buf, obj->type, obj->value, flags);
     }
     return sclone(mprGetBufStart(buf));
 }
 
 
 /*
-    Serialize into JSON format.
+    Serialize into JSON format
  */
 PUBLIC char *mprJsonToString(MprJson *obj, int flags)
 {
@@ -13204,45 +13254,100 @@ static void setValue(MprJson *obj, cchar *value, int type)
 }
 
 
-static void formatValue(MprBuf *buf, MprJson *obj, int flags)
+PUBLIC void mprFormatJsonName(MprBuf *buf, cchar *name, int flags)
+{
+    cchar   *cp;
+    int     quotes;
+
+    quotes = flags & MPR_JSON_QUOTES;
+    for (cp = name; *cp; cp++) {
+        if (!isalnum((uchar) *cp) && *cp != '_') {
+            quotes++;
+            break;
+        }
+    }
+    if (quotes) {
+        mprPutCharToBuf(buf, '"');
+    }
+    for (cp = name; *cp; cp++) {
+        if (*cp == '\"' || *cp == '\\') {
+            mprPutCharToBuf(buf, '\\');
+            mprPutCharToBuf(buf, *cp);
+        } else if (*cp == '\b') {
+            mprPutStringToBuf(buf, "\\b");
+        } else if (*cp == '\f') {
+            mprPutStringToBuf(buf, "\\f");
+        } else if (*cp == '\n') {
+            mprPutStringToBuf(buf, "\\n");
+        } else if (*cp == '\r') {
+            mprPutStringToBuf(buf, "\\r");
+        } else if (*cp == '\t') {
+            mprPutStringToBuf(buf, "\\t");
+        } else if (iscntrl((uchar) *cp)) {
+            mprPutToBuf(buf, "\\u%04x", *cp);
+        } else {
+            mprPutCharToBuf(buf, *cp);
+        }
+    }
+    if (quotes) {
+        mprPutCharToBuf(buf, '"');
+    }
+}
+
+
+PUBLIC void mprFormatJsonString(MprBuf *buf, cchar *value)
 {
     cchar   *cp;
 
-    if (!(obj->type & MPR_JSON_STRING) && !(flags & MPR_JSON_STRINGS)) {
-        if (obj->value == 0) {
-            mprPutStringToBuf(buf, "null");
-        } else if (obj->type & MPR_JSON_REGEXP) {
-            mprPutToBuf(buf, "\"/%s/\"", obj->value);
+    mprPutCharToBuf(buf, '"');
+    for (cp = value; *cp; cp++) {
+        if (*cp == '\"' || *cp == '\\') {
+            mprPutCharToBuf(buf, '\\');
+            mprPutCharToBuf(buf, *cp);
+        } else if (*cp == '\b') {
+            mprPutStringToBuf(buf, "\\b");
+        } else if (*cp == '\f') {
+            mprPutStringToBuf(buf, "\\f");
+        } else if (*cp == '\n') {
+            mprPutStringToBuf(buf, "\\n");
+        } else if (*cp == '\r') {
+            mprPutStringToBuf(buf, "\\r");
+        } else if (*cp == '\t') {
+            mprPutStringToBuf(buf, "\\t");
+        } else if (iscntrl((uchar) *cp)) {
+            mprPutToBuf(buf, "\\u%04x", *cp);
         } else {
-            mprPutStringToBuf(buf, obj->value);
+            mprPutCharToBuf(buf, *cp);
+        }
+    }
+    mprPutCharToBuf(buf, '"');
+}
+
+
+PUBLIC void mprFormatJsonValue(MprBuf *buf, int type, cchar *value, int flags)
+{
+    if (!(type & MPR_JSON_STRING) && !(flags & MPR_JSON_STRINGS)) {
+        if (value == 0) {
+            mprPutStringToBuf(buf, "null");
+        } else if (type & MPR_JSON_REGEXP) {
+            mprPutToBuf(buf, "\"/%s/\"", value);
+        } else {
+            mprPutStringToBuf(buf, value);
         }
         return;
     }
-    switch (obj->type & MPR_JSON_DATA_TYPE) {
+    switch (type & MPR_JSON_DATA_TYPE) {
     case MPR_JSON_FALSE:
     case MPR_JSON_NUMBER:
     case MPR_JSON_TRUE:
     case MPR_JSON_NULL:
     case MPR_JSON_UNDEFINED:
-        mprPutStringToBuf(buf, obj->value);
+        mprPutStringToBuf(buf, value);
         break;
     case MPR_JSON_REGEXP:
     case MPR_JSON_STRING:
     default:
-        mprPutCharToBuf(buf, '"');
-        for (cp = obj->value; *cp; cp++) {
-            if (*cp == '\"' || *cp == '\\') {
-                mprPutCharToBuf(buf, '\\');
-                mprPutCharToBuf(buf, *cp);
-            } else if (*cp == '\r') {
-                mprPutStringToBuf(buf, "\\\\r");
-            } else if (*cp == '\n') {
-                mprPutStringToBuf(buf, "\\\\n");
-            } else {
-                mprPutCharToBuf(buf, *cp);
-            }
-        }
-        mprPutCharToBuf(buf, '"');
+        mprFormatJsonString(buf, value);
     }
 }
 
@@ -14429,7 +14534,7 @@ PUBLIC int mprWaitForSingleIO(int fd, int mask, MprTicks timeout)
     struct kevent   interest[2], events[1];
     int             kq, interestCount, rc, result;
 
-    if (timeout < 0) {
+    if (timeout < 0 || timeout > MAXINT) {
         timeout = MAXINT;
     }
     interestCount = 0; 
@@ -14954,8 +15059,7 @@ PUBLIC int mprRemoveItem(MprList *lp, cvoid *item)
         return -1;
     }
     lock(lp);
-    index = mprLookupItem(lp, item);
-    if (index < 0) {
+    if ((index = mprLookupItem(lp, item)) < 0) {
         unlock(lp);
         return index;
     }
@@ -16046,7 +16150,7 @@ PUBLIC void mprDefaultLogHandler(cchar *tags, int level, cchar *msg)
     char        tbuf[128];
     static int  check = 0;
 
-    if ((file = MPR->logFile) == 0) {
+    if ((file = MPR->logFile) == 0 || msg == 0 || *msg == '\0') {
         return;
     }
     if (MPR->logBackup && MPR->logSize && (check++ % 1000) == 0) {
@@ -16067,7 +16171,9 @@ PUBLIC void mprDefaultLogHandler(cchar *tags, int level, cchar *msg)
         }
     }
     mprWriteFileString(file, msg);
-    mprWriteFileString(file, "\n");
+    if (*msg && msg[slen(msg) - 1] != '\n') {
+        mprWriteFileString(file, "\n");
+    }
 #if ME_MPR_OSLOG
     if (level == 0) {
         mprWriteToOsLog(sfmt("%s: %d %s: %s", MPR->name, level, tags, msg), level);
@@ -18125,10 +18231,12 @@ static MprList *getDirFiles(cchar *path)
         fileInfo.isDir = 0;
         rc = mprGetPathInfo(fileName, &fileInfo);
         if ((dp = mprAllocObj(MprDirEntry, manageDirEntry)) == 0) {
+            closedir(dir);
             return list;
         }
         dp->name = sclone(dirent->d_name);
         if (dp->name == 0) {
+            closedir(dir);
             return list;
         }
         if (rc == 0 || fileInfo.isLink) {
@@ -19455,10 +19563,12 @@ PUBLIC char *mprSearchPath(cchar *file, int flags, cchar *search, ...)
         while (dir && *dir) {
             path = mprJoinPath(dir, file);
             if ((result = checkPath(path, flags)) != 0) {
+                va_end(args);
                 return mprNormalizePath(result);
             }
             if ((flags & MPR_SEARCH_EXE) && *ME_EXE) {
                 if ((result = checkPath(mprJoinPathExt(path, ME_EXE), flags)) != 0) {
+                    va_end(args);
                     return mprNormalizePath(result);
                 }
             }
@@ -19680,6 +19790,7 @@ PUBLIC int mprGetRandomBytes(char *buf, ssize length, bool block)
         rc = read(fd, &buf[sofar], length);
         if (rc < 0) {
             assert(0);
+            close(fd);
             return MPR_ERR_CANT_READ;
         }
         length -= rc;
@@ -19772,6 +19883,9 @@ PUBLIC void mprNap(MprTicks timeout)
     assert(timeout >= 0);
 
     mark = mprGetTicks();
+    if (timeout < 0 || timeout > MAXINT) {
+        timeout = MAXINT;
+    }
     remaining = timeout;
     do {
         /* MAC OS X corrupts the timeout if using the 2nd paramater, so recalc each time */
@@ -21193,7 +21307,8 @@ PUBLIC int mprCreateNotifierService(MprWaitService *ws)
     for (rc = retries = 0; retries < maxTries; retries++) {
         breakSock = socket(AF_INET, SOCK_DGRAM, 0);
         if (breakSock < 0) {
-            mprLog("critical mpr select", 0, "Cannot open port %d to use for select. Retrying.");
+            mprLog("critical mpr select", 0, "Cannot create socket to use for select");
+            return MPR_ERR_CANT_OPEN;
         }
 #if ME_UNIX_LIKE
         fcntl(breakSock, F_SETFD, FD_CLOEXEC);
@@ -21248,7 +21363,7 @@ PUBLIC void mprManageSelect(MprWaitService *ws, int flags)
 PUBLIC int mprNotifyOn(MprWaitHandler *wp, int mask)
 {
     MprWaitService  *ws;
-    int     fd;
+    int     fd, hd;
 
     ws = wp->service;
     fd = wp->fd;
@@ -21272,17 +21387,18 @@ PUBLIC int mprNotifyOn(MprWaitHandler *wp, int mask)
         if (mask & MPR_WRITABLE) {
             FD_SET(fd, &ws->writeMask);
         }
+        mprSetItem(ws->handlerMap, fd, mask ? wp : 0);
+
         wp->desiredMask = mask;
         ws->highestFd = max(fd, ws->highestFd);
         if (mask == 0 && fd == ws->highestFd) {
-            while (--fd > 0) {
-                if (FD_ISSET(fd, &ws->readMask) || FD_ISSET(fd, &ws->writeMask)) {
+            for (hd = fd - 1; hd >= 0; hd--) {
+                if (FD_ISSET(hd, &ws->readMask) || FD_ISSET(hd, &ws->writeMask)) {
                     break;
                 }
             }
-            ws->highestFd = fd;
+            ws->highestFd = hd;
         }
-        mprSetItem(ws->handlerMap, fd, mask ? wp : 0);
     }
     mprWakeEventService();
     unlock(ws);
@@ -21892,93 +22008,7 @@ static void standardSignalHandler(void *ignored, MprSignal *sp)
 
 
 #if !VXWORKS
-/*
-    On MAC OS X, getaddrinfo is not thread-safe and crashes when called by a 2nd thread at any time. ie. locking wont help.
- */
 #define ME_COMPILER_HAS_GETADDRINFO 1
-#endif
-
-/********************************** Defines ***********************************/
-#if ME_COM_SSL
-
-/*
-    See: http://www.iana.org/assignments/tls-parameters/tls-parameters.xml
-*/
-MprCipher mprCiphers[] = {
-    { 0x0001, "SSL_RSA_WITH_NULL_MD5" },
-    { 0x0002, "SSL_RSA_WITH_NULL_SHA" },
-    { 0x0004, "TLS_RSA_WITH_RC4_128_MD5" },
-    { 0x0005, "TLS_RSA_WITH_RC4_128_SHA" },
-    { 0x0009, "SSL_RSA_WITH_DES_CBC_SHA" },
-    { 0x000A, "SSL_RSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0x0015, "SSL_DHE_RSA_WITH_DES_CBC_SHA" },
-    { 0x0016, "SSL_DHE_RSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0x001A, "SSL_DH_ANON_WITH_DES_CBC_SHA" },
-    { 0x001B, "SSL_DH_ANON_WITH_3DES_EDE_CBC_SHA" },
-    { 0x002F, "TLS_RSA_WITH_AES_128_CBC_SHA" },
-    { 0x0033, "TLS_DHE_RSA_WITH_AES_128_CBC_SHA" },
-    { 0x0034, "TLS_DH_ANON_WITH_AES_128_CBC_SHA" },
-    { 0x0035, "TLS_RSA_WITH_AES_256_CBC_SHA" },
-    { 0x0039, "TLS_DHE_RSA_WITH_AES_256_CBC_SHA" },
-    { 0x003A, "TLS_DH_ANON_WITH_AES_256_CBC_SHA" },
-    { 0x003B, "SSL_RSA_WITH_NULL_SHA256" },
-    { 0x003C, "TLS_RSA_WITH_AES_128_CBC_SHA256" },
-    { 0x003D, "TLS_RSA_WITH_AES_256_CBC_SHA256" },
-    { 0x0041, "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA" },
-    { 0x0067, "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256" },
-    { 0x006B, "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256" },
-    { 0x006C, "TLS_DH_ANON_WITH_AES_128_CBC_SHA256" },
-    { 0x006D, "TLS_DH_ANON_WITH_AES_256_CBC_SHA256" },
-    { 0x0084, "TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA" },
-    { 0x0088, "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA" },
-    { 0x008B, "TLS_PSK_WITH_3DES_EDE_CBC_SHA" },
-    { 0x008C, "TLS_PSK_WITH_AES_128_CBC_SHA" },
-    { 0x008D, "TLS_PSK_WITH_AES_256_CBC_SHA" },
-    { 0x008F, "SSL_DHE_PSK_WITH_3DES_EDE_CBC_SHA" },
-    { 0x0090, "TLS_DHE_PSK_WITH_AES_128_CBC_SHA" },
-    { 0x0091, "TLS_DHE_PSK_WITH_AES_256_CBC_SHA" },
-    { 0x0093, "TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA" },
-    { 0x0094, "TLS_RSA_PSK_WITH_AES_128_CBC_SHA" },
-    { 0x0095, "TLS_RSA_PSK_WITH_AES_256_CBC_SHA" },
-    { 0xC001, "TLS_ECDH_ECDSA_WITH_NULL_SHA" },
-    { 0xC003, "SSL_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0xC004, "TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA" },
-    { 0xC005, "TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA" },
-    { 0xC006, "TLS_ECDHE_ECDSA_WITH_NULL_SHA" },
-    { 0xC008, "SSL_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0xC009, "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA" },
-    { 0xC00A, "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA" },
-    { 0xC00B, "TLS_ECDH_RSA_WITH_NULL_SHA" },
-    { 0xC00D, "SSL_ECDH_RSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0xC00E, "TLS_ECDH_RSA_WITH_AES_128_CBC_SHA" },
-    { 0xC00F, "TLS_ECDH_RSA_WITH_AES_256_CBC_SHA" },
-    { 0xC010, "TLS_ECDHE_RSA_WITH_NULL_SHA" },
-    { 0xC012, "SSL_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA" },
-    { 0xC013, "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA" },
-    { 0xC014, "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA" },
-    { 0xC015, "TLS_ECDH_anon_WITH_NULL_SHA" },
-    { 0xC017, "SSL_ECDH_anon_WITH_3DES_EDE_CBC_SHA" },
-    { 0xC018, "TLS_ECDH_anon_WITH_AES_128_CBC_SHA" },
-    { 0xC019, "TLS_ECDH_anon_WITH_AES_256_CBC_SHA " },
-    { 0xC023, "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256" },
-    { 0xC024, "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384" },
-    { 0xC025, "TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256" },
-    { 0xC026, "TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384" },
-    { 0xC027, "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256" },
-    { 0xC028, "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384" },
-    { 0xC029, "TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256" },
-    { 0xC02A, "TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384" },
-    { 0xC02B, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" },
-    { 0xC02C, "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" },
-    { 0xC02D, "TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256" },
-    { 0xC02E, "TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384" },
-    { 0xC02F, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" },
-    { 0xC030, "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" },
-    { 0xC031, "TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256" },
-    { 0xC032, "TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384" },
-    { 0xFFF0, "TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8" },
-    { 0x0, 0 },
-};
 #endif
 
 /********************************** Forwards **********************************/
@@ -22055,7 +22085,6 @@ static void manageSocketService(MprSocketService *ss, int flags)
 {
     if (flags & MPR_MANAGE_MARK) {
         mprMark(ss->standardProvider);
-        mprMark(ss->providers);
         mprMark(ss->sslProvider);
         mprMark(ss->secureSockets);
         mprMark(ss->mutex);
@@ -22089,23 +22118,18 @@ static MprSocketProvider *createStandardProvider(MprSocketService *ss)
 }
 
 
-PUBLIC void mprAddSocketProvider(cchar *name, MprSocketProvider *provider)
+PUBLIC void mprSetSslProvider(MprSocketProvider *provider)
 {
     MprSocketService    *ss;
 
     ss = MPR->socketService;
-
-    if (ss->providers == 0 && (ss->providers = mprCreateHash(0, 0)) == 0) {
-        return;
-    }
-    ss->sslProvider = provider->name = sclone(name);
-    mprAddKey(ss->providers, name, provider);
+    ss->sslProvider =  provider;
 }
 
 
 PUBLIC bool mprHasSecureSockets()
 {
-    return (MPR->socketService->providers != 0);
+    return (MPR->socketService->sslProvider != 0);
 }
 
 
@@ -22164,20 +22188,21 @@ PUBLIC MprSocket *mprCloneSocket(MprSocket *sp)
 static void manageSocket(MprSocket *sp, int flags)
 {
     if (flags & MPR_MANAGE_MARK) {
-        mprMark(sp->handler);
         mprMark(sp->acceptIp);
-        mprMark(sp->ip);
-        mprMark(sp->errorMsg);
-        mprMark(sp->provider);
-        mprMark(sp->listenSock);
-        mprMark(sp->sslSocket);
-        mprMark(sp->ssl);
         mprMark(sp->cipher);
+        mprMark(sp->errorMsg);
+        mprMark(sp->handler);
+        mprMark(sp->ip);
+        mprMark(sp->listenSock);
+        mprMark(sp->mutex);
         mprMark(sp->peerName);
         mprMark(sp->peerCert);
         mprMark(sp->peerCertIssuer);
+        mprMark(sp->provider);
+        mprMark(sp->ssl);
+        mprMark(sp->sslSocket);
         mprMark(sp->service);
-        mprMark(sp->mutex);
+        mprMark(sp->session);
 
     } else if (flags & MPR_MANAGE_FREE) {
         if (sp->fd != INVALID_SOCKET) {
@@ -23455,10 +23480,10 @@ PUBLIC int mprGetSocketInfo(cchar *ip, int port, int *family, int *protocol, str
  */
 static int getSocketIpAddr(struct sockaddr *addr, int addrlen, char *ip, int ipLen, int *port)
 {
-#if (ME_UNIX_LIKE || WIN)
+#if (ME_UNIX_LIKE || ME_WIN_LIKE)
     char    service[NI_MAXSERV];
 
-#ifdef IN6_IS_ADDR_V4MAPPED
+#if ME_WIN_LIKE || defined(IN6_IS_ADDR_V4MAPPED)
     if (addr->sa_family == AF_INET6) {
         struct sockaddr_in6* addr6 = (struct sockaddr_in6*) addr;
         if (IN6_IS_ADDR_V4MAPPED(&addr6->sin6_addr)) {
@@ -23535,8 +23560,16 @@ static int ipv6(cchar *ip)
 PUBLIC int mprParseSocketAddress(cchar *address, char **pip, int *pport, int *psecure, int defaultPort)
 {
     char    *ip, *cp;
+    ssize   pos;
     int     port;
 
+    if (!address || *address == 0) {
+        return MPR_ERR_BAD_ARGS;
+    }
+    pos = strspn(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%");
+    if (pos < slen(address)) {
+        return MPR_ERR_BAD_ARGS;
+    }
     ip = 0;
     if (defaultPort < 0) {
         defaultPort = 80;
@@ -23651,16 +23684,14 @@ PUBLIC void mprSetSocketPrebindCallback(MprSocketPrebind callback)
 static void manageSsl(MprSsl *ssl, int flags) 
 {
     if (flags & MPR_MANAGE_MARK) {
-        mprMark(ssl->providerName);
-        mprMark(ssl->provider);
-        mprMark(ssl->key);
-        mprMark(ssl->keyFile);
         mprMark(ssl->certFile);
         mprMark(ssl->caFile);
         mprMark(ssl->caPath);
         mprMark(ssl->ciphers);
         mprMark(ssl->config);
+        mprMark(ssl->keyFile);
         mprMark(ssl->mutex);
+        mprMark(ssl->revoke);
     }
 }
 
@@ -23691,12 +23722,23 @@ PUBLIC MprSsl *mprCreateSsl(int server)
         if (MPR->verifySsl) {
             ssl->verifyPeer = MPR->verifySsl;
             ssl->verifyIssuer = MPR->verifySsl;
-            path = mprJoinPath(mprGetAppDir(), MPR_CA_CERT);
+            path = mprJoinPath(mprGetAppDir(), ME_SSL_ROOTS_CERT);
             if (mprPathExists(path, R_OK)) {
                 ssl->caFile = path;
+            } else {
+                mprLog("error mpr", 0, "Cannot locate root certificates file: %s", path);
             }
         }
     }
+    /*
+        Sensible defaults
+     */
+    ssl->cacheSize = ME_MPR_SSL_CACHE;
+    ssl->logLevel = ME_MPR_SSL_LOG_LEVEL;
+    ssl->renegotiate = ME_MPR_SSL_RENEGOTIATE;
+    ssl->ticket = ME_MPR_SSL_TICKET;
+    ssl->sessionTimeout = ME_MPR_SSL_TIMEOUT;
+
     ssl->mutex = mprCreateLock();
     return ssl;
 }
@@ -23724,26 +23766,16 @@ PUBLIC int mprLoadSsl()
 #if ME_COM_SSL
     MprSocketService    *ss;
     MprModule           *mp;
-    cchar               *path;
 
     ss = MPR->socketService;
-    if (ss->providers) {
+    if (ss->sslProvider) {
         return 0;
     }
-    path = mprJoinPath(mprGetAppDir(), "libmprssl");
-    if (!mprPathExists(path, R_OK)) {
-        path = mprSearchForModule("libmprssl");
-    }
-    if (!path) {
-        return MPR_ERR_CANT_FIND;
-    }
-    if ((mp = mprCreateModule("sslModule", path, "mprSslInit", NULL)) == 0) {
+    if ((mp = mprCreateModule("ssl", "builtin", "mprSslInit", NULL)) == 0) {
         return MPR_ERR_CANT_CREATE;
     }
-    if (mprLoadModule(mp) < 0) {
-        mprLog("error mpr", 0, "Cannot load %s", path);
-        return MPR_ERR_CANT_READ;
-    }
+    mprSslInit(MPR, mp);
+    mprLog("info ssl", 5, "Loaded %s SSL provider", ss->sslProvider->name);
     return 0;
 #else
     mprLog("error mpr", 0, "SSL communications support not included in build");
@@ -23752,17 +23784,17 @@ PUBLIC int mprLoadSsl()
 }
 
 
-static int loadProviders()
+static int loadProvider()
 {
     MprSocketService    *ss;
 
     ss = MPR->socketService;
     mprGlobalLock();
-    if (!ss->providers && mprLoadSsl() < 0) {
+    if (!ss->sslProvider && mprLoadSsl() < 0) {
         mprGlobalUnlock();
         return MPR_ERR_CANT_READ;
     }
-    if (!ss->providers) {
+    if (!ss->sslProvider) {
         mprLog("error mpr", 0, "Cannot load SSL provider");
         mprGlobalUnlock();
         return MPR_ERR_CANT_INITIALIZE;
@@ -23778,7 +23810,6 @@ static int loadProviders()
 PUBLIC int mprUpgradeSocket(MprSocket *sp, MprSsl *ssl, cchar *peerName)
 {
     MprSocketService    *ss;
-    cchar               *providerName;
 
     ss  = sp->service;
     assert(sp);
@@ -23786,18 +23817,12 @@ PUBLIC int mprUpgradeSocket(MprSocket *sp, MprSsl *ssl, cchar *peerName)
     if (!ssl) {
         return MPR_ERR_BAD_ARGS;
     }
-    if (!ssl->provider) {
-        if (loadProviders() < 0) {
+    if (!ss->sslProvider) {
+        if (loadProvider() < 0) {
             return MPR_ERR_CANT_INITIALIZE;
         }
-        providerName = (ssl->providerName) ? ssl->providerName : ss->sslProvider;
-        if ((ssl->provider = mprLookupKey(ss->providers, providerName)) == 0) {
-            sp->errorMsg = sfmt("Cannot use SSL, missing SSL provider %s", providerName);
-            return MPR_ERR_CANT_INITIALIZE;
-        }
-        ssl->providerName = providerName;
     }
-    sp->provider = ssl->provider;
+    sp->provider = ss->sslProvider;
 #if KEEP
     /* session resumption can cause problems with Nagle. However, appweb opens sockets with nodelay by default */
     sp->flags |= MPR_SOCKET_NODELAY;
@@ -23819,26 +23844,10 @@ PUBLIC void mprAddSslCiphers(MprSsl *ssl, cchar *ciphers)
 }
 
 
-PUBLIC void mprSetSslCiphers(MprSsl *ssl, cchar *ciphers)
+PUBLIC void mprSetSslCacheSize(MprSsl *ssl, int size)
 {
     assert(ssl);
-    ssl->ciphers = sclone(ciphers);
-    ssl->changed = 1;
-}
-
-
-PUBLIC void mprSetSslKeyFile(MprSsl *ssl, cchar *keyFile)
-{
-    assert(ssl);
-    ssl->keyFile = (keyFile && *keyFile) ? sclone(keyFile) : 0;
-    ssl->changed = 1;
-}
-
-
-PUBLIC void mprSetSslCertFile(MprSsl *ssl, cchar *certFile)
-{
-    assert(ssl);
-    ssl->certFile = (certFile && *certFile) ? sclone(certFile) : 0;
+    ssl->cacheSize = size;
     ssl->changed = 1;
 }
 
@@ -23851,7 +23860,6 @@ PUBLIC void mprSetSslCaFile(MprSsl *ssl, cchar *caFile)
 }
 
 
-/* Only supported in OpenSSL */
 PUBLIC void mprSetSslCaPath(MprSsl *ssl, cchar *caPath)
 {
     assert(ssl);
@@ -23860,7 +23868,38 @@ PUBLIC void mprSetSslCaPath(MprSsl *ssl, cchar *caPath)
 }
 
 
-/* Only supported in OpenSSL */
+PUBLIC void mprSetSslCertFile(MprSsl *ssl, cchar *certFile)
+{
+    assert(ssl);
+    ssl->certFile = (certFile && *certFile) ? sclone(certFile) : 0;
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslCiphers(MprSsl *ssl, cchar *ciphers)
+{
+    assert(ssl);
+    ssl->ciphers = sclone(ciphers);
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslLogLevel(MprSsl *ssl, int level)
+{
+    assert(ssl);
+    ssl->logLevel = level;
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslKeyFile(MprSsl *ssl, cchar *keyFile)
+{
+    assert(ssl);
+    ssl->keyFile = (keyFile && *keyFile) ? sclone(keyFile) : 0;
+    ssl->changed = 1;
+}
+
+
 PUBLIC void mprSetSslProtocols(MprSsl *ssl, int protocols)
 {
     assert(ssl);
@@ -23869,10 +23908,34 @@ PUBLIC void mprSetSslProtocols(MprSsl *ssl, int protocols)
 }
 
 
-PUBLIC void mprSetSslProvider(MprSsl *ssl, cchar *provider)
+PUBLIC void mprSetSslRenegotiate(MprSsl *ssl, bool enable)
 {
     assert(ssl);
-    ssl->providerName = (provider && *provider) ? sclone(provider) : 0;
+    ssl->renegotiate = enable;
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslRevoke(MprSsl *ssl, cchar *revoke)
+{
+    assert(ssl);
+    ssl->revoke = (revoke && *revoke) ? sclone(revoke) : 0;
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslTicket(MprSsl *ssl, bool enable)
+{
+    assert(ssl);
+    ssl->ticket = enable;
+    ssl->changed = 1;
+}
+
+
+PUBLIC void mprSetSslTimeout(MprSsl *ssl, MprTicks timeout)
+{
+    assert(ssl);
+    ssl->sessionTimeout = timeout;
     ssl->changed = 1;
 }
 
@@ -23904,35 +23967,6 @@ PUBLIC void mprVerifySslDepth(MprSsl *ssl, int depth)
     ssl->changed = 1;
 }
 
-
-PUBLIC cchar *mprGetSslCipherName(int code)
-{
-#if ME_COM_SSL
-    MprCipher   *cp;
-
-    for (cp = mprCiphers; cp->name; cp++) {
-        if (cp->code == code) {
-            return cp->name;
-        }
-    }
-#endif
-    return 0;
-}
-
-
-PUBLIC int mprGetSslCipherCode(cchar *cipher)
-{
-#if ME_COM_SSL
-    MprCipher   *cp;
-
-    for (cp = mprCiphers; cp->name; cp++) {
-        if (smatch(cp->name, cipher)) {
-            return cp->code;
-        }
-    }
-#endif
-    return 0;
-}
 
 /*
     @copy   default
@@ -24080,9 +24114,7 @@ PUBLIC char *scamel(cchar *str)
  */
 PUBLIC int scaselesscmp(cchar *s1, cchar *s2)
 {
-    if (s1 == 0 || s2 == 0) {
-        return -1;
-    } else if (s1 == 0) {
+    if (s1 == 0) {
         return -1;
     } else if (s2 == 0) {
         return 1;
@@ -24120,7 +24152,7 @@ PUBLIC char *sncontains(cchar *str, cchar *pattern, ssize limit)
     if (pattern == 0 || *pattern == '\0') {
         return 0;
     }
-    for (cp = str; *cp && limit > 0; cp++, limit--) {
+    for (cp = str; limit > 0 && *cp; cp++, limit--) {
         s1 = cp;
         s2 = pattern;
         for (lim = limit; *s1 && *s2 && (*s1 == *s2) && lim > 0; lim--) {
@@ -24194,13 +24226,16 @@ PUBLIC int scmp(cchar *s1, cchar *s2)
 }
 
 
-PUBLIC bool sends(cchar *str, cchar *suffix)
+PUBLIC cchar *sends(cchar *str, cchar *suffix)
 {
     if (str == 0 || suffix == 0) {
         return 0;
     }
+    if (slen(str) < slen(suffix)) {
+        return 0;
+    }
     if (strcmp(&str[slen(str) - slen(suffix)], suffix) == 0) {
-        return 1;
+        return &str[slen(str) - slen(suffix)];
     }
     return 0;
 }
@@ -24297,6 +24332,7 @@ PUBLIC char *sjoinv(cchar *buf, va_list args)
         str = va_arg(ap, char*);
     }
     if ((dest = mprAlloc(required)) == 0) {
+        va_end(ap);
         return 0;
     }
     dp = dest;
@@ -24312,6 +24348,7 @@ PUBLIC char *sjoinv(cchar *buf, va_list args)
         str = va_arg(ap, char*);
     }
     *dp = '\0';
+    va_end(ap);
     return dest;
 }
 
@@ -24354,9 +24391,7 @@ PUBLIC int sncaselesscmp(cchar *s1, cchar *s2, ssize n)
 
     assert(0 <= n && n < MAXINT);
 
-    if (s1 == 0 || s2 == 0) {
-        return -1;
-    } else if (s1 == 0) {
+    if (s1 == 0) {
         return -1;
     } else if (s2 == 0) {
         return 1;
@@ -24605,6 +24640,7 @@ PUBLIC char *srejoinv(char *buf, va_list args)
         str = va_arg(ap, char*);
     }
     if ((dest = mprRealloc(buf, required)) == 0) {
+        va_end(ap);
         return 0;
     }
     dp = &dest[len];
@@ -24616,6 +24652,7 @@ PUBLIC char *srejoinv(char *buf, va_list args)
         str = va_arg(ap, char*);
     }
     *dp = '\0';
+    va_end(ap);
     return dest;
 }
 
@@ -24647,7 +24684,7 @@ PUBLIC char *sreplace(cchar *str, cchar *pattern, cchar *replacement)
 
 
 /*
-    Split a string at a delimiter and return the parts.
+    Split a string at a substring and return the parts.
     This differs from stok in that it never returns null. Also, stok eats leading deliminators, whereas 
     ssplit will return an empty string if there are leading deliminators.
     Note: Modifies the original string and returns the string for chaining.
@@ -24856,6 +24893,37 @@ PUBLIC char *stok(char *str, cchar *delim, char **last)
         *last = end;
     }
     return start;
+}
+
+
+/*
+    Tokenize a string at a pattern and return the parts. The delimiter is a string not a set of characters.
+    If the pattern is not found, last is set to null.
+    Note: Modifies the original string and returns the string for chaining.
+ */
+PUBLIC char *sptok(char *str, cchar *pattern, char **last)
+{
+    char    *cp, *end;
+
+    if (last) {
+        *last = MPR->emptyString;
+    }
+    if (str == 0) {
+        return 0;
+    }
+    if (pattern == 0 || *pattern == '\0') {
+        return str;
+    }
+    if ((cp = strstr(str, pattern)) != 0) {
+        *cp = '\0';
+        end = &cp[slen(pattern)];
+    } else {
+        end = 0;
+    }
+    if (last) {
+        *last = end;
+    }
+    return str;
 }
 
 
@@ -25411,7 +25479,7 @@ PUBLIC void mprSetThreadPriority(MprThread *tp, int newPriority)
     SetThreadPriority(tp->threadHandle, osPri);
 #elif VXWORKS
     taskPrioritySet(tp->osThread, osPri);
-#elif ME_UNIX_LIKE && DISABLED
+#elif ME_UNIX_LIKE && DISABLED && DEPRECATED
     /*
         Not worth setting thread priorities on linux
      */
@@ -26170,10 +26238,10 @@ PUBLIC ssize mprGetBusyWorkerCount()
 
 /********************************** Defines ***********************************/
 
-#define MS_PER_SEC  (MPR_TICKS_PER_SEC)
-#define MS_PER_HOUR (60 * 60 * MPR_TICKS_PER_SEC)
-#define MS_PER_MIN  (60 * MPR_TICKS_PER_SEC)
-#define MS_PER_DAY  (86400 * MPR_TICKS_PER_SEC)
+#define MS_PER_SEC  (TPS)
+#define MS_PER_HOUR (60 * 60 * TPS)
+#define MS_PER_MIN  (60 * TPS)
+#define MS_PER_DAY  (86400 * TPS)
 #define MS_PER_YEAR (INT64(31556952000))
 
 /*
@@ -28146,7 +28214,9 @@ PUBLIC void mprNap(MprTicks milliseconds)
     struct timespec timeout;
     int             rc;
 
-    assert(milliseconds >= 0);
+    if (milliseconds < 0 || milliseconds > MAXINT) {
+        milliseconds = MAXINT;
+    }
     timeout.tv_sec = milliseconds / 1000;
     timeout.tv_nsec = (milliseconds % 1000) * 1000000;
     do {
@@ -28197,6 +28267,9 @@ PUBLIC int usleep(uint msec)
     struct timespec     timeout;
     int                 rc;
 
+    if (msec < 0 || msec > MAXINT) {
+        msec = MAXINT;
+    }
     timeout.tv_sec = msec / (1000 * 1000);
     timeout.tv_nsec = msec % (1000 * 1000) * 1000;
     do {
@@ -28405,19 +28478,17 @@ static void manageWaitHandler(MprWaitHandler *wp, int flags)
 }
 
 
-/*
-    This is a special case API, it is called by finalizers such as closeSocket.
-    It needs special handling for the shutdown case.
- */
 PUBLIC void mprRemoveWaitHandler(MprWaitHandler *wp)
 {
     if (wp) {
         if (!mprIsStopped()) {
-            /* Avoid locking APIs during shutdown - the locks may have been freed */
-            mprRemoveItem(wp->service->handlers, wp);
+            /*
+                It needs special handling for the shutdown case when the locks have been removed
+             */
             if (wp->fd >= 0 && wp->desiredMask) {
                 mprNotifyOn(wp, 0);
             }
+            mprRemoveItem(wp->service->handlers, wp);
         }
         wp->fd = INVALID_SOCKET;
     }
@@ -29741,9 +29812,9 @@ PUBLIC void mprStopOsService()
 }
 
 
-PUBLIC long mprGetInst()
+PUBLIC HINSTANCE mprGetInst()
 {
-    return (long) MPR->appInstance;
+    return MPR->appInstance;
 }
 
 
@@ -30798,3 +30869,4 @@ PUBLIC int mprXmlGetLineNumber(MprXml *xp)
 
     @end
  */
+

@@ -157,7 +157,8 @@ struct  MprXml;
 #define MPR_TIMEOUT_NAP         20          /**< Short pause */
 
 #define MPR_MAX_TIMEOUT         MAXINT64
-#if DEPRECATED || 1
+
+#if DEPRECATED
 #define MPR_TICKS_PER_SEC       TPS        /**< Time ticks per second */
 #endif
 
@@ -1034,12 +1035,13 @@ typedef struct MprFreeQueue {
 #define MPR_MEM_WARNING             0x1         /**< Memory use exceeds warnHeap level limit */
 #define MPR_MEM_LIMIT               0x2         /**< Memory use exceeds memory limit - invoking policy */
 #define MPR_MEM_FAIL                0x4         /**< Memory allocation failed - immediate exit */
-#define MPR_MEM_TOO_BIG             0x4         /**< Memory allocation request is too big - immediate exit */
+#define MPR_MEM_TOO_BIG             0x8         /**< Memory allocation request is too big - immediate exit */
 
 /**
     Memory allocation error callback. Notifiers are called if a low memory condition exists.
     @param cause Set to the cause of the memory error. Set to #MPR_MEM_WARNING if the allocation will exceed the warnHeap
-        limit. Set to #MPR_MEM_LIMIT if it would exceed the maxHeap memory limit. Set to #MPR_MEM_FAIL if the allocation failed.
+        limit. Set to #MPR_MEM_LIMIT if it would exceed the maxHeap memory limit. Set to #MPR_MEM_FAIL if the
+        allocation failed.
         Set to #MPR_MEM_TOO_BIG if the allocation block size is too large.
         Allocations will be rejected for MPR_MEM_FAIL and MPR_MEM_TOO_BIG, otherwise the allocations will proceed and the
         memory notifier will be invoked.
@@ -1916,11 +1918,11 @@ PUBLIC ssize scopy(char *dest, ssize destMax, cchar *src);
     Test if the string ends with a given pattern.
     @param str String to examine
     @param suffix Pattern to search for
-    @return Returns TRUE if the pattern was found. Otherwise returns zero.
+    @return Returns a pointer to the start of the pattern if found. Otherwise returns NULL.
     @ingroup MprString
-    @stability Stable
+    @stability Evolving
  */
-PUBLIC bool sends(cchar *str, cchar *suffix);
+PUBLIC cchar *sends(cchar *str, cchar *suffix);
 
 /**
     Erase the contents of a string
@@ -2308,7 +2310,7 @@ PUBLIC int64 stoiradix(cchar *str, int radix, int *err);
 
 /**
     Tokenize a string
-    @description Split a string into tokens.
+    @description Split a string into tokens using a character set as delimiters.
     @param str String to tokenize.
     @param delim Set of characters that are used as token separators.
     @param last Last token pointer.
@@ -2317,6 +2319,18 @@ PUBLIC int64 stoiradix(cchar *str, int radix, int *err);
     @stability Stable
  */
 PUBLIC char *stok(char *str, cchar *delim, char **last);
+
+/**
+    Tokenize a string
+    @description Split a string into tokens using a string pattern as delimiters.
+    @param str String to tokenize.
+    @param pattern String pattern to use for token delimiters.
+    @param last Last token pointer.
+    @return Returns a pointer to the next token.
+    @ingroup MprString
+    @stability Prototype
+*/
+PUBLIC char *sptok(char *str, cchar *pattern, char **last);
 
 /**
    String to list. This parses the string into space separated arguments. Single and double quotes are supported.
@@ -3663,6 +3677,7 @@ PUBLIC int mprGetListLength(MprList *list);
         this routine, mprGetFirstItem must be called to initialize the traversal of the list.
     @param list List pointer returned from mprCreateList.
     @param lastIndex Pointer to an integer that will hold the last index retrieved.
+    @return Next item in list or null for an empty list or after the last item.
     @ingroup MprList
     @stability Stable.
  */
@@ -3675,6 +3690,7 @@ PUBLIC void *mprGetNextItem(MprList *list, int *lastIndex);
         this routine, mprGetFirstItem must be called to initialize the traversal of the list.
     @param list List pointer returned from mprCreateList.
     @param lastIndex Pointer to an integer that will hold the last index retrieved.
+    @return Next item in list
     @ingroup MprList
     @internal
     @stability Stable
@@ -6541,6 +6557,39 @@ PUBLIC MprHash *mprDeserialize(cchar *str);
 PUBLIC MprHash *mprDeserializeInto(cchar *str, MprHash *hash);
 
 /**
+    Format a JSON name into and output buffer. This handles quotes and backquotes.
+    @param buf MprBuf instance to store the output string
+    @param name Json name to format
+    @param flags Serialization flags. Supported flags include MPR_JSON_QUOTES to always wrap property names in quotes.
+    @return The supplied hash if successful. Otherwise null is returned.
+    @ingroup MprJson
+    @stability Prototype
+ */
+PUBLIC void mprFormatJsonName(MprBuf *buf, cchar *name, int flags);
+
+/**
+    Format a string as a JSON string. This handles quotes and backquotes.
+    @param buf MprBuf instance to store the output string
+    @param value JSON string value to format
+    @return The supplied hash if successful. Otherwise null is returned.
+    @ingroup MprJson
+    @stability Prototype
+ */
+PUBLIC void mprFormatJsonString(MprBuf *buf, cchar *value);
+
+/**
+    Format a value as a simple JSON string. This converts any JSON value to a string representation.
+    @param buf MprBuf instance to store the output string
+    @param type JSON type to format
+    @param value JSON value to format
+    @param flags Serialization flags. Supported flags include MPR_JSON_STRINGS to emit values as quoted strings.
+    @return The supplied hash if successful. Otherwise null is returned.
+    @ingroup MprJson
+    @stability Prototype
+ */
+PUBLIC void mprFormatJsonValue(MprBuf *buf, int type, cchar *value, int flags);
+
+/**
     Get a parsed JSON object for a key value
     @param obj Parsed JSON object returned by mprJsonParser
     @param key Property name to search for. This may include ".". For example: "settings.mode".
@@ -7458,8 +7507,7 @@ typedef int (*MprSocketPrebind)(struct MprSocket *sock);
  */
 typedef struct MprSocketService {
     MprSocketProvider *standardProvider;        /**< Socket provider for non-SSL connections */
-    char            *sslProvider;               /**< Default secure provider for SSL connections */
-    MprHash         *providers;                 /**< Secure socket providers */
+    MprSocketProvider *sslProvider;             /**< Socket provider for SSL connections */
     MprSocketPrebind prebind;                   /**< Prebind callback */
     MprList         *secureSockets;             /**< List of secured (matrixssl) sockets */
     MprMutex        *mutex;                     /**< Multithread locking */
@@ -7493,15 +7541,6 @@ PUBLIC bool mprHasSecureSockets();
  */
 PUBLIC int mprSetMaxSocketAccept(int max);
 
-/**
-    Add a secure socket provider for SSL communications
-    @param name Name of the secure socket provider
-    @param provider Socket provider object
-    @ingroup MprSocket
-    @stability Stable
- */
-PUBLIC void mprAddSocketProvider(cchar *name, MprSocketProvider *provider);
-
 /*
     Socket close flags
  */
@@ -7529,7 +7568,6 @@ PUBLIC void mprAddSocketProvider(cchar *name, MprSocketProvider *provider);
 #define MPR_SOCKET_SERVER           0x400   /**< Socket is on the server-side */
 #define MPR_SOCKET_BUFFERED_READ    0x800   /**< Socket has buffered read data (in SSL stack) */
 #define MPR_SOCKET_BUFFERED_WRITE   0x1000  /**< Socket has buffered write data (in SSL stack) */
-#define MPR_SOCKET_CHECKED          0x2000  /**< Peer certificate has been checked */
 #define MPR_SOCKET_DISCONNECTED     0x4000  /**< The mprDisconnectSocket has been called */
 #define MPR_SOCKET_HANDSHAKING      0x8000  /**< Doing an SSL handshake */
 
@@ -7548,9 +7586,9 @@ PUBLIC void mprAddSocketProvider(cchar *name, MprSocketProvider *provider);
         mprGetSocketHandle mprGetSocketInfo mprGetSocketPort mprGetSocketState mprHasSecureSockets mprIsSocketEof
         mprIsSocketSecure mprListenOnSocket mprLoadSsl mprParseIp mprReadSocket mprSendFileToSocket mprSetSecureProvider
         mprSetSocketBlockingMode mprSetSocketCallback mprSetSocketEof mprSetSocketNoDelay mprSetSslCaFile mprSetSslCaPath
-        mprSetSslCertFile mprSetSslCiphers mprSetSslKeyFile mprSetSslSslProtocols mprSetSslVerifySslClients mprWriteSocket
-        mprWriteSocketString mprWriteSocketVector mprSocketHandshaking mprSocketHasBufferedRead mprSocketHasBufferedWrite
-        mprUpgradeSocket
+        mprSetSslCertFile mprSetSslCiphers mprSetSslKeyFile mprSetSslDhFile mprSetSslSslProtocols mprSetSslVerifySslClients
+        mprWriteSocket mprWriteSocketString mprWriteSocketVector mprSocketHandshaking mprSocketHasBufferedRead 
+        mprSocketHasBufferedWrite mprUpgradeSocket
     @defgroup MprSocket MprSocket
     @stability Internal
  */
@@ -7568,10 +7606,11 @@ typedef struct MprSocket {
     struct MprSocket *listenSock;       /**< Listening socket */
     void            *sslSocket;         /**< Extended SSL socket state */
     struct MprSsl   *ssl;               /**< SSL configuration */
-    char            *cipher;            /**< Selected SSL cipher */
-    char            *peerName;          /**< Peer common SSL name */
-    char            *peerCert;          /**< Peer SSL certificate */
-    char            *peerCertIssuer;    /**< Issuer of peer certificate */
+    cchar           *cipher;            /**< Selected SSL cipher */
+    cchar           *session;           /**< SSL session ID (dependent on SSL provider) */
+    cchar           *peerName;          /**< Peer common SSL name */
+    cchar           *peerCert;          /**< Peer SSL certificate */
+    cchar           *peerCertIssuer;    /**< Issuer of peer certificate */
     bool            secured;            /**< SSL Peer verified */
     MprMutex        *mutex;             /**< Multi-thread sync */
 } MprSocket;
@@ -8049,8 +8088,28 @@ PUBLIC ssize mprWriteSocketString(MprSocket *sp, cchar *str);
 PUBLIC ssize mprWriteSocketVector(MprSocket *sp, MprIOVec *iovec, int count);
 
 /************************************ SSL *************************************/
+/*
+    Root certificates for verifying peer certs.
+ */
+#ifndef ME_SSL_ROOTS_CERT
+    #define ME_SSL_ROOTS_CERT "roots.crt"
+#endif
 
-#define MPR_CA_CERT "ca.crt"
+#ifndef ME_MPR_SSL_CACHE
+    #define ME_MPR_SSL_CACHE 512
+#endif
+#ifndef ME_MPR_SSL_LOG_LEVEL
+    #define ME_MPR_SSL_LOG_LEVEL 3
+#endif
+#ifndef ME_MPR_SSL_RENEGOTIATE
+    #define ME_MPR_SSL_RENEGOTIATE 1
+#endif
+#ifndef ME_MPR_SSL_TICKET
+    #define ME_MPR_SSL_TICKET 1
+#endif
+#ifndef ME_MPR_SSL_TIMEOUT
+    #define ME_MPR_SSL_TIMEOUT 86400
+#endif
 
 /**
     SSL control structure
@@ -8059,21 +8118,25 @@ PUBLIC ssize mprWriteSocketVector(MprSocket *sp, MprIOVec *iovec, int count);
  */
 typedef struct MprSsl {
     cchar           *providerName;      /**< SSL provider to use - null if default */
-    struct MprSocketProvider *provider; /**< Cached SSL provider to use */
-    cchar           *key;               /**< Key string */
     cchar           *keyFile;           /**< Alternatively, locate the key in a file */
-    cchar           *certFile;          /**< Alternatively, locate the cert in a file */
+    cchar           *certFile;          /**< Certificate filename */
+    cchar           *revoke;            /**< Certificate revocation list */
     cchar           *caFile;            /**< Certificate verification cert file or bundle */
     cchar           *caPath;            /**< Certificate verification cert directory (OpenSSL only) */
     cchar           *ciphers;           /**< Candidate ciphers to use */
-    bool            verified;           /**< Peer has been verified */
     void            *config;            /**< Extended provider SSL configuration */
+    bool            changed;            /**< Set if there is a change in the SSL config. Reset by providers */
     bool            configured;         /**< Set if this SSL configuration has been processed */
+    bool            renegotiate;        /**< Renegotiate sessions */
+    bool            ticket;             /**< Enable session tickets */
     bool            verifyPeer;         /**< Verify the peer verificate */
     bool            verifyIssuer;       /**< Set if the certificate issuer should be also verified */
-    bool            changed;            /**< Set if there is a change in the SSL config. Reset by providers */
+    bool            verified;           /**< Peer has been verified */
+    int             logLevel;           /**< Level at which to start tracing SSL events */
+    int             cacheSize;          /**< Session cache size in entries */
     int             verifyDepth;        /**< Cert chain depth that should be verified */
     int             protocols;          /**< SSL protocols */
+    MprTicks        sessionTimeout;     /**< Session lifespan in msec */
     MprMutex        *mutex;             /**< Multithread sync */
 } MprSsl;
 
@@ -8082,10 +8145,11 @@ typedef struct MprSsl {
  */
 #define MPR_PROTO_SSLV2    0x1              /**< SSL V2 protocol */
 #define MPR_PROTO_SSLV3    0x2              /**< SSL V3 protocol */
-#define MPR_PROTO_TLSV1_1  0x4              /**< TLS V1.1 protocol */
-#define MPR_PROTO_TLSV1_2  0x8              /**< TLS V1.2 protocol */
+#define MPR_PROTO_TLSV1_0  0x8              /**< TLS V1.0 protocol */
+#define MPR_PROTO_TLSV1_1  0x10             /**< TLS V1.1 protocol */
+#define MPR_PROTO_TLSV1_2  0x20             /**< TLS V1.2 protocol */
 #define MPR_PROTO_TLSV1    (MPR_PROTO_TLSV1_1 | MPR_PROTO_TLSV1_2)
-#define MPR_PROTO_ALL      0xF              /**< All protocols */
+#define MPR_PROTO_ALL      0x2F             /**< All protocols */
 
 /**
     Add the ciphers to use for SSL
@@ -8112,24 +8176,6 @@ PUBLIC struct MprSsl *mprCreateSsl(int server);
  */
 PUBLIC struct MprSsl *mprCloneSsl(MprSsl *src);
 
-/**
-    Lookup an SSL cipher by its IANA code and return the string name
-    @param cipher Cipher IANA code
-    @return String cipher name. For example: given 0x35, return "TLS_RSA_WITH_AES_256_CBC_SHA".
-    @stability Evolving
-    @ingroup MprSsl
- */
-PUBLIC cchar *mprGetSslCipherName(int cipher);
-
-/**
-    Lookup an SSL cipher by its IANA name and return the cipher IANA code
-    @param cipher Cipher IANA name
-    @return String cipher code. For example: given "TLS_RSA_WITH_AES_256_CBC_SHA" return 0x35.
-    @stability Evolving
-    @ingroup MprSsl
- */
-PUBLIC int mprGetSslCipherCode(cchar *cipher);
-
  /**
     Load the SSL module.
     @ingroup MprSsl
@@ -8138,13 +8184,11 @@ PUBLIC int mprGetSslCipherCode(cchar *cipher);
 PUBLIC int mprLoadSsl();
 
 /**
-    Set the key file to use for SSL
-    @param ssl SSL instance returned from #mprCreateSsl
-    @param keyFile Path to the SSL key file
+    Initialize the SSL provider
     @ingroup MprSsl
-    @stability Stable
+    @stability Evolving
  */
-PUBLIC void mprSetSslKeyFile(struct MprSsl *ssl, cchar *keyFile);
+PUBLIC int mprSslInit(void *unused, MprModule *module);
 
 /**
     Set certificate to use for SSL
@@ -8185,6 +8229,33 @@ PUBLIC void mprSetSslCaPath(struct MprSsl *ssl, cchar *caPath);
 PUBLIC void mprSetSslCiphers(MprSsl *ssl, cchar *ciphers);
 
 /**
+    Set the SSL server-side session cache size
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param size Size of the cache in entries
+    @ingroup MprSsl
+    @stability Prototype
+ */
+PUBLIC void mprSetSslCacheSize(MprSsl *ssl, int size);
+
+/**
+    Set the key file to use for SSL
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param keyFile Path to the SSL key file
+    @ingroup MprSsl
+    @stability Stable
+ */
+PUBLIC void mprSetSslKeyFile(struct MprSsl *ssl, cchar *keyFile);
+
+/**
+    Set the SSL log level at which to start tracing SSL events
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param level Log level (0-9)
+    @ingroup MprSsl
+    @stability Prototype
+ */
+PUBLIC void mprSetSslLogLevel(struct MprSsl *ssl, int level);
+
+/**
     Set the SSL protocol to use
     @param ssl SSL instance returned from #mprCreateSsl
     @param protocols SSL protocols mask
@@ -8195,21 +8266,56 @@ PUBLIC void mprSetSslProtocols(struct MprSsl *ssl, int protocols);
 
 /**
     Set the SSL provider to use
-    @param ssl SSL instance returned from #mprCreateSsl
-    @param provider SSL provider name (openssl | matrixssl | est | nanossl)
-    @ingroup MprSsl
-    @stability Stable
- */
-PUBLIC void mprSetSslProvider(MprSsl *ssl, cchar *provider);
-
-/**
-    Require verification of peer certificates
-    @param ssl SSL instance returned from #mprCreateSsl
-    @param on Set to true to enable peer SSL certificate verification.
+    @param provider Socket provider object
     @ingroup MprSsl
     @stability Evolving
  */
-PUBLIC void mprVerifySslPeer(struct MprSsl *ssl, bool on);
+PUBLIC void mprSetSslProvider(MprSocketProvider *provider);
+
+/**
+    Control SSL session renegotiation
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param enable Set to true to enable renegotiation (enabled by default)
+    @ingroup MprSsl
+    @stability Prototype
+ */
+PUBLIC void mprSetSslRenegotiate(MprSsl *ssl, bool enable);
+
+/**
+    Define a list of certificates to revoke
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param revoke Path to the SSL certificate revocation list
+    @ingroup MprSsl
+    @stability Prototype
+ */
+PUBLIC void mprSetSslRevoke(struct MprSsl *ssl, cchar *revoke);
+
+/**
+    Enable SSL session tickets
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param enable Set to true to enable
+    @ingroup MprSsl
+    @stability Prototype
+*/
+PUBLIC void mprSetSslTicket(MprSsl *ssl, bool enable);
+
+/**
+    Set the SSL server-side session timeout
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param timeout Lifetime of session entries in msec
+    @ingroup MprSsl
+    @stability Prototype
+ */
+PUBLIC void mprSetSslTimeout(MprSsl *ssl, MprTicks timeout);
+
+/**
+    Control the depth of SSL SSL certificate verification
+    @param ssl SSL instance returned from #mprCreateSsl
+    @param depth Set to the number of intermediate certificates to verify. Defaults to 1.
+    @ingroup MprSsl
+    @stability Evolving
+ */
+PUBLIC void mprVerifySslDepth(struct MprSsl *ssl, int depth);
 
 /**
     Control the verification of SSL certificate issuers
@@ -8221,13 +8327,13 @@ PUBLIC void mprVerifySslPeer(struct MprSsl *ssl, bool on);
 PUBLIC void mprVerifySslIssuer(struct MprSsl *ssl, bool on);
 
 /**
-    Control the depth of SSL SSL certificate verification
+    Require verification of peer certificates
     @param ssl SSL instance returned from #mprCreateSsl
-    @param depth Set to the number of intermediate certificates to verify. Defaults to 1.
+    @param on Set to true to enable peer SSL certificate verification.
     @ingroup MprSsl
     @stability Evolving
  */
-PUBLIC void mprVerifySslDepth(struct MprSsl *ssl, int depth);
+PUBLIC void mprVerifySslPeer(struct MprSsl *ssl, bool on);
 
 #if ME_COM_EST
     PUBLIC int mprCreateEstModule();
@@ -8241,16 +8347,6 @@ PUBLIC void mprVerifySslDepth(struct MprSsl *ssl, int depth);
 #if ME_COM_OPENSSL
     PUBLIC int mprCreateOpenSslModule();
 #endif
-
-/**
-    @internal
- */
-typedef struct MprCipher {
-    int     code;
-    cchar   *name;
-} MprCipher;
-
-PUBLIC_DATA MprCipher mprCiphers[];
 
 /******************************* Worker Threads *******************************/
 /**
@@ -10350,9 +10446,9 @@ PUBLIC HWND mprGetHwnd();
     Get the windows application instance
     @return The application instance identifier
     @ingroup Mpr
-    @stability Stable.
+    @stability Evolving.
  */
-PUBLIC long mprGetInst();
+PUBLIC HINSTANCE mprGetInst();
 
 /**
     Set the MPR windows handle
