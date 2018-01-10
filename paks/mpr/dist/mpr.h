@@ -158,10 +158,6 @@ struct  MprXml;
 
 #define MPR_MAX_TIMEOUT         MAXINT64
 
-#if DEPRECATED
-#define MPR_TICKS_PER_SEC       TPS        /**< Time ticks per second */
-#endif
-
 /*
     Default thread counts
  */
@@ -204,8 +200,12 @@ struct  MprXml;
         #define ME_EVENT_NOTIFIER MPR_EVENT_ASYNC
     #elif VXWORKS
         #define ME_EVENT_NOTIFIER MPR_EVENT_SELECT
-    #elif (LINUX || ME_BSD_LIKE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0))
-        #define ME_EVENT_NOTIFIER MPR_EVENT_EPOLL
+    #elif (LINUX || ME_BSD_LIKE)
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+            #define ME_EVENT_NOTIFIER MPR_EVENT_EPOLL
+        #else
+            #define ME_EVENT_NOTIFIER MPR_EVENT_SELECT
+        #endif
     #else
         #define ME_EVENT_NOTIFIER MPR_EVENT_SELECT
     #endif
@@ -268,7 +268,7 @@ struct  MprXml;
 #define MPR_ERR_WOULD_BLOCK             -33     /**< Blocking operation would block */
 #define MPR_ERR_MAX                     -34
 
-#if DEPRECATED || 1
+#if DEPRECATE
 /**
     Standard logging trace levels are 0 to 5 with 0 being the least verbose.
  */
@@ -511,8 +511,6 @@ typedef struct MprSpin {
         bool                    freed;         /**< Mutex has been destroyed */
     #elif VXWORKS
         SEM_ID                  cs;
-    #elif MACOSX
-        OSSpinLock              cs;
     #elif ME_UNIX_LIKE
         #if ME_COMPILER_HAS_SPINLOCK
             pthread_spinlock_t  cs;
@@ -605,10 +603,7 @@ PUBLIC bool mprTrySpinLock(MprSpin *lock);
     /*
         Spin lock macros
      */
-    #if MACOSX
-        #define mprSpinLock(lock)   if (lock) OSSpinLockLock(&((lock)->cs))
-        #define mprSpinUnlock(lock) if (lock) OSSpinLockUnlock(&((lock)->cs))
-    #elif ME_UNIX_LIKE && ME_COMPILER_HAS_SPINLOCK
+    #if ME_UNIX_LIKE && ME_COMPILER_HAS_SPINLOCK
         #define mprSpinLock(lock)   if (lock) pthread_spin_lock(&((lock)->cs))
         #define mprSpinUnlock(lock) if (lock) pthread_spin_unlock(&((lock)->cs))
     #elif ME_UNIX_LIKE
@@ -987,10 +982,10 @@ typedef struct MprFreeQueue {
 #define MPR_MANAGER_OFFSET          1
 #define MPR_MEM_PAD_PTR(mp, offset) ((void*) (((char*) mp) + mp->size - ((offset) * sizeof(void*))))
 #define GET_MANAGER(mp)             ((MprManager) (*(void**) ((MPR_MEM_PAD_PTR(mp, MPR_MANAGER_OFFSET)))))
-#define SET_MANAGER(mp, fn)         if (1) { \
+#define SET_MANAGER(mp, fn)         do { \
                                         *((MprManager*) MPR_MEM_PAD_PTR(mp, MPR_MANAGER_OFFSET)) = fn ; \
                                         mp->hasManager = 1; \
-                                    } else
+                                    } while (0);
 /*
     Manager callback flags
  */
@@ -1698,7 +1693,7 @@ PUBLIC void mprRemoveRoot(cvoid *ptr);
                 } \
                 HINC(marked); \
             } \
-        } else
+        } else {}
 #endif
 
 /*
@@ -1994,6 +1989,7 @@ PUBLIC ssize slen(cchar *str);
     Convert a string to lower case.
     @description Convert a string to its lower case equivalent.
     @param str String to convert.
+    @return An allocated string.
     @ingroup MprString
     @stability Stable
  */
@@ -2113,7 +2109,7 @@ PUBLIC bool snumber(cchar *s);
     @stability Stable
  */
 PUBLIC char *stitle(cchar *str);
-#if DEPRECATED || 1
+#if DEPRECATE
 #define spascal(s) stitle(s)
 #endif
 
@@ -2341,7 +2337,7 @@ PUBLIC char *strim(cchar *str, cchar *set, int where);
     Convert a string to upper case.
     @description Convert a string to its upper case equivalent.
     @param str String to convert.
-    @return Returns a pointer to the converted string. Will always equal str.
+    @return Returns a pointer to an allocated string.
     @ingroup MprString
     @stability Stable
  */
@@ -3177,15 +3173,15 @@ PUBLIC char *mprFormatLocalTime(cchar *fmt, MprTime time);
 
 /**
     Convert a time value to universal time and format as a string.
-    @description Format a time string. This uses strftime if available and so the supported formats vary from platform to platform.
-        Strftime should supports some of these these formats described below.
+    @description Format a time string. This uses strftime if available and so the supported formats vary from
+        platform to platform. Strftime should supports some of these these formats described below.
     @param fmt Time format string
             \n
-        %A ... full weekday name (Monday)
+         %A ... full weekday name (Monday)
             \n
-        %a ... abbreviated weekday name (Mon)
+         %a ... abbreviated weekday name (Mon)
             \n
-        %B ... full month name (January)
+         %B ... full month name (January)
             \n
          %b ... abbreviated month name (Jan)
             \n
@@ -3261,7 +3257,7 @@ PUBLIC char *mprFormatLocalTime(cchar *fmt, MprTime time);
             \n
          %% ... percent sign
             \n\n
-     Some platforms may also support the following format extensions:
+            Some platforms may also support the following format extensions:
             \n
         %E* ... POSIX locale extensions. Where "*" is one of the characters: c, C, x, X, y, Y.
             \n
@@ -3285,7 +3281,7 @@ PUBLIC char *mprFormatLocalTime(cchar *fmt, MprTime time);
             \n
         "%v "07-Jul-2003"
             \n
-        RFC3399: "%FT%TZ" "1985-04-12T23:20:50.52Z"
+        RFC3399: "%FT%TZ" "1985-04-12T23:20:50.52Z" which is April 12 1985, 23:20.50 and 52 msec
 \n\n
     @param time Time to format. Use mprGetTime to retrieve the current time.
     @return The formatting time string
@@ -3436,6 +3432,22 @@ PUBLIC MprTime mprMakeUniversalTime(struct tm *tm);
 
 /*
     Parse a string into a time value
+    @description Try to intelligently parse a date.
+    This is a tolerant parser. It is not validating and will do its best to parse any possible date string.
+    Supports the following date/time formats:
+    \n\n
+        ISO dates: 2009-05-21t16:06:05.000z
+    \n\n
+        Date:  07/28/2014, 07/28/08, Jan/28/2014, Jaunuary-28-2014, 28-jan-2014.
+    \n\n
+        Support date order: dd/mm/yy, mm/dd/yy and yyyy/mm/dd
+    \n\n
+        Support separators "/", ".", "-"
+    \n\n
+        Timezones: GMT|UTC[+-]NN[:]NN
+    \n\n
+        Time: 10:52[:23]
+    \n\n
     @param time Pointer to a time value to receive the parsed time value
     @param dateString String to parse
     @param timezone Timezone in which to interpret the date
@@ -3443,6 +3455,7 @@ PUBLIC MprTime mprMakeUniversalTime(struct tm *tm);
     @returns Zero if successful
     @ingroup MprTime
     @stability Stable
+
  */
 PUBLIC int mprParseTime(MprTime *time, cchar *dateString, int timezone, struct tm *defaults);
 
@@ -4027,7 +4040,7 @@ PUBLIC MprLogHandler mprGetLogHandler();
         messages. This is useful for utility programs.
         If tags are null, the message is output raw, without any any prefixes.
     @param level Logging level for this message. The level is 0-5 with five being the most verbose.
-    @param fmt Printf style format string. Variable number of arguments to
+    @param fmt Printf style format string. Variable number of arguments to print
     @param ... Variable number of arguments for printf data
     @remarks mprLog is highly useful as a debugging aid.
     @ingroup MprLog
@@ -4044,7 +4057,7 @@ PUBLIC void mprLogProc(cchar *tags, int level, cchar *fmt, ...) PRINTF_ATTRIBUTE
  */
 PUBLIC void mprLogConfig();
 
-#if DEPRECATED || 1
+#if DEPRECATE
 #define mprLogHeader mprLogConfig
 #endif
 
@@ -4094,7 +4107,7 @@ PUBLIC MprLogHandler mprSetLogHandler(MprLogHandler handler);
     @param flags Set to MPR_LOG_CONFIG to show the configuration in the log file. Set to MPR_LOG_CMDLINE if a command line
         override has been used to initiate logging. Set MPR_LOG_DETAILED to use the detailed message format.
         Set MPR_LOG_ANEW to truncate existing log files after backup.
-    @return Zero if successful, otherwise a negative Mpr error code. See the Appweb log for diagnostics.
+    @return Zero if successful, otherwise a negative Mpr error code. See the log for diagnostics.
     @ingroup MprLog
     @stability Stable
 */
@@ -4136,7 +4149,7 @@ PUBLIC int mprUsingDefaultLogHandler();
     #define mprLog(tags, l, ...) if (1) ; else {}
 #endif
 
-#if DEPRECATED || 1
+#if DEPRECATE
 /*
     Should use mprDebug for debug messages and mprLog for production messages
  */
@@ -4213,8 +4226,8 @@ typedef struct MprHash {
     @description Add a symbol to the hash which may clash with an existing entry. Duplicate symbols can be added to
         the hash, but only one may be retrieved via #mprLookupKey. To recover duplicate entries walk the hash using
         #mprGetNextKey.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @param ptr Arbitrary pointer to associate with the key in the table.
     @return Integer count of the number of entries.
     @ingroup MprHash
@@ -4226,8 +4239,8 @@ PUBLIC MprKey *mprAddDuplicateKey(MprHash *table, cvoid *key, cvoid *ptr);
     Add a symbol value into the hash table
     @description Associate an arbitrary value with a string symbol key and insert into the symbol table.
         This will replace existing key values. Use mprAddDuplicateKey to allow duplicates.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @param ptr Arbitrary pointer to associate with the key in the table.
     @return Added MprKey reference.
     @ingroup MprHash
@@ -4238,8 +4251,8 @@ PUBLIC MprKey *mprAddKey(MprHash *table, cvoid *key, cvoid *ptr);
 /**
     Add a symbol value into the hash table and set the key type.
     @description Associate an arbitrary value with a string symbol key and insert into the symbol table.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @param ptr Arbitrary pointer to associate with the key in the table.
     @param type Type of value.
     @return Added MprKey reference.
@@ -4251,8 +4264,8 @@ PUBLIC MprKey *mprAddKeyWithType(MprHash *table, cvoid *key, cvoid *ptr, int typ
 /**
     Add a key with a formatting value into the hash table
     @description Associate a formatted value with a key and insert into the symbol table.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @param fmt Format string. See #mprPrintf.
     @return Integer count of the number of entries.
     @ingroup MprHash
@@ -4263,7 +4276,7 @@ PUBLIC MprKey *mprAddKeyFmt(MprHash *table, cvoid *key, cchar *fmt, ...) PRINTF_
 /**
     Copy a hash table
     @description Create a new hash table and copy all the entries from an existing table.
-    @param table Symbol table returned via mprCreateSymbolTable.
+    @param table Symbol table returned via mprCreateHash.
     @return A new hash table initialized with the contents of the original hash table.
     @ingroup MprHash
     @stability Stable.
@@ -4299,7 +4312,7 @@ PUBLIC MprHash *mprCreateHashFromWords(cchar *str);
 /**
     Return the first symbol in a symbol entry
     @description Prepares for walking the contents of a symbol table by returning the first entry in the symbol table.
-    @param table Symbol table returned via mprCreateSymbolTable.
+    @param table Symbol table returned via mprCreateHash.
     @return Pointer to the first entry in the symbol table.
     @ingroup MprHash
     @stability Stable.
@@ -4312,7 +4325,7 @@ PUBLIC MprKey *mprGetFirstKey(MprHash *table);
         the next entry in the symbol table. A previous call to mprGetFirstSymbol
         or mprGetNextSymbol is required to supply the value of the \a last
         argument.
-    @param table Symbol table returned via mprCreateSymbolTable.
+    @param table Symbol table returned via mprCreateHash.
     @param last Symbol table entry returned via mprGetFirstSymbol or mprGetNextSymbol.
     @return Pointer to the first entry in the symbol table.
     @ingroup MprHash
@@ -4323,7 +4336,7 @@ PUBLIC MprKey *mprGetNextKey(MprHash *table, MprKey *last);
 /**
     Return the count of symbols in a symbol entry
     @description Returns the number of symbols currently existing in a symbol table.
-    @param table Symbol table returned via mprCreateSymbolTable.
+    @param table Symbol table returned via mprCreateHash.
     @return Integer count of the number of entries.
     @ingroup MprHash
     @stability Stable.
@@ -4333,8 +4346,8 @@ PUBLIC int mprGetHashLength(MprHash *table);
 /**
     Lookup a symbol in the hash table.
     @description Lookup a symbol key and return the value associated with that key.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @return Value associated with the key when the entry was inserted via mprInsertSymbol.
     @ingroup MprHash
     @stability Stable.
@@ -4344,8 +4357,8 @@ PUBLIC void *mprLookupKey(MprHash *table, cvoid *key);
 /**
     Lookup a symbol in the hash table and return the hash entry
     @description Lookup a symbol key and return the hash table descriptor associated with that key.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @return MprKey for the entry
     @ingroup MprHash
     @stability Stable.
@@ -4355,8 +4368,8 @@ PUBLIC MprKey *mprLookupKeyEntry(MprHash *table, cvoid *key);
 /**
     Remove a symbol entry from the hash table.
     @description Removes a symbol entry from the symbol table. The entry is looked up via the supplied \a key.
-    @param table Symbol table returned via mprCreateSymbolTable.
-    @param key String key of the symbole entry to delete.
+    @param table Symbol table returned via mprCreateHash.
+    @param key String key of the symbol entry to delete.
     @return Returns zero if successful, otherwise a negative MPR error code is returned.
     @ingroup MprHash
     @stability Stable.
@@ -4400,8 +4413,11 @@ PUBLIC char *mprHashKeysToString(MprHash *hash, cchar *join);
  */
 typedef Offset MprOff;
 
-#ifndef ME_NO_DISK
-    #define ME_NO_DISK 0
+#ifndef ME_MPR_DISK
+    #define ME_MPR_DISK 1
+#endif
+#ifndef ME_MPR_ROM_MOUNT
+    #define ME_MPR_ROM_MOUNT "/rom"
 #endif
 
 /*
@@ -4474,7 +4490,6 @@ typedef struct MprFileSystem {
  */
 PUBLIC void mprInitFileSystem(MprFileSystem *fs, cchar *path);
 
-#if ME_ROM
 /**
     A RomInode is created for each file in the Rom file system.
     @ingroup FileSystem
@@ -4491,32 +4506,19 @@ typedef struct MprRomFileSystem {
     MprFileSystem   fileSystem;         /**< Extends MprFileSystem */
     MprHash         *fileIndex;
     MprRomInode     *romInodes;         /**< File inode data (unmanaged) */
-#if UNUSED
-    int             rootLen;
-#endif
 } MprRomFileSystem;
 
+#if ME_ROM
 /**
     Create and initialize the ROM FileSystem.
     @description This is an internal routine called by the MPR during initialization.
     @param path Path name to the root of the file system.
+    @param inodes File definitions
     @return Returns a new file system object
     @ingroup MprFileSystem
     @stability Internal
 */
 PUBLIC MprRomFileSystem *mprCreateRomFileSystem(cchar *path, MprRomInode *inodes);
-
-#if UNUSED
-/**
-    Set the ROM file system data.
-    @description This defines the list of files present in the ROM file system. Use makerom to generate the inodeList data.
-    @param inodeList Reference to the ROM file system list of files (inodes). This is generated by the makerom tool.
-    @return Returns zero if successful.
-    @ingroup MprFileSystem
-    @stability Stable
- */
-PUBLIC int mprSetRomFileSystem(MprRomInode *inodeList);
-#endif
 
 /**
     Get the ROM file system data
@@ -4574,7 +4576,6 @@ PUBLIC void mprSetPathSeparators(cchar *path, cchar *separators);
  */
 PUBLIC void mprSetPathNewline(cchar *path, cchar *newline);
 
-//MOB
 PUBLIC MprList *mprGetDirList(cchar *path);
 
 /**
@@ -4601,9 +4602,7 @@ typedef struct MprFile {
     int             perms;              /**< File permissions */
     int             fd;                 /**< File handle */
     int             attached;           /**< Attached to existing descriptor */
-#if ME_ROM
     MprRomInode     *inode;             /**< Reference to ROM file */
-#endif
 } MprFile;
 
 
@@ -4960,7 +4959,7 @@ PUBLIC int mprDeletePath(cchar *path);
         back-slash directory separators and will have a drive specifier. On Cygwin, the path will be a Cygwin style
         path with forward-slash directory specifiers and without a drive specifier. If the path is outside the
         cygwin filesystem (outside c:/cygwin), the path will have a /cygdrive/DRIVE prefix. To get a windows style
-        path, use mprGetWinPath.
+        path on *NIX, use mprGetWinPath.
     @param path Path to examine
     @returns An absolute path.
     @ingroup MprPath
@@ -5071,15 +5070,14 @@ PUBLIC char *mprGetPathExt(cchar *path);
 PUBLIC MprList *mprGetPathFiles(cchar *dir, int flags);
 
 /**
-    Create a list of files in a directory or subdirectories that match the given wildcard patterns.
+    Create a list of files in a directory or subdirectories that match the given wildcard pattern.
         This call returns a list of filenames.
-    @description Get the list of files in a directory and return a list. The patterns list may contain
-    multiple patterns separated by a comma. The supported wildcard patterns are: "?" Matches any single character,
-    "*" matches zero or more characters of the file or directory, "**"/ matches zero or more directories,
-    "**" matches zero or more files or directories,and a trailing "/" matches directories only.
+    @description Get the list of files in a directory and return a list. The pattern list may contain
+    wild cards: "?" Matches any single character, "*" matches zero or more characters of the file or directory,
+    "**"/ matches zero or more directories, "**" matches zero or more files or directories.
     An exclusion pattern may be specified to apply to subsequent patterns by appending with "!".
     @param path Directory to list.
-    @param patterns Wild card patterns to match.
+    @param patterns Wild card pattern to match.
     @param flags Set to MPR_PATH_HIDDEN to include hidden files that start with ".". Set to MPR_PATH_DEPTH_FIRST to do a
         depth-first traversal, i.e. traverse subdirectories before considering adding the directory to the list.
         Set MPR_PATH_RELATIVE to return files relative to the given path. Set MPR_PATH_NO_DIRS to omit directories.
@@ -5933,10 +5931,10 @@ PUBLIC MprDispatcher *mprGetDispatcher();
     Application event code that is running off a dispatcher should never call mprServiceEvents recursively. Rather, the
     event code should call #mprWaitForEvent if it needs to wait while servicing events on its own dispatcher.
     @param delay Time in milliseconds to wait. Set to zero for no wait. Set to -1 to wait forever.
-    @param flags If set to MPR_SERVICE_NO_BLOCK, this call will service all due events without blocking. Otherwise set 
+    @param flags If set to MPR_SERVICE_NO_BLOCK, this call will service all due events without blocking. Otherwise set
         to zero.
     @returns The number of events serviced. Returns MPR_ERR_BUSY is another thread is servicing events.
-        Returns when the MPR is stopping or if the timeout expires or if MPR_SERVICE_NO_BLOCK is specified and there are 
+        Returns when the MPR is stopping or if the timeout expires or if MPR_SERVICE_NO_BLOCK is specified and there are
         no more events to service.
     @ingroup MprDispatcher
     @stability Stable
@@ -6047,7 +6045,7 @@ PUBLIC void mprSignalDispatcher(MprDispatcher *dispatcher);
  */
 PUBLIC MprEvent *mprCreateEvent(MprDispatcher *dispatcher, cchar *name, MprTicks period, void *proc, void *data, int flags);
 
-#if DEPRECATED || 1
+#if DEPRECATE
 PUBLIC int mprCreateEventOutside(MprDispatcher *dispatcher, cchar *name, void *proc, void *data, int flags);
 #endif
 
@@ -6776,7 +6774,7 @@ PUBLIC cchar *mprReadJson(MprJson *obj, cchar *name);
  */
 PUBLIC MprJson *mprReadJsonValue(MprJson *obj, cchar *value);
 
-#if DEPRECATED
+#if DEPRECATE
 #define mprLookupJsonObj mprReadJsonObj
 #define mprLookupJson mprReadJson
 #define mprLookupJsonValue mprReadJsonValue
@@ -7027,16 +7025,7 @@ PUBLIC cchar *mprGetCurrentThreadName();
  */
 PUBLIC cchar *mprGetThreadName(MprThread *thread);
 
-/**
-    Get the thread priroity
-    @description Get the current priority for the specified thread.
-    @param thread Thread object returned by #mprCreateThread
-    @returns An integer MPR thread priority between 0 and 100 inclusive.
-    @ingroup MprThread
-    @stability Deprecated
- */
-PUBLIC int mprGetThreadPriority(MprThread *thread);
-
+#if DEPRECATE
 /**
     Set the thread priroity for the current thread.
     @description Set the current priority for the specified thread.
@@ -7065,10 +7054,10 @@ PUBLIC void mprSetCurrentThreadPriority(int priority);
     @stability Deprecated
  */
 PUBLIC void mprSetThreadPriority(MprThread *thread, int priority);
+#endif /* DEPRECATE */
 
 /**
     Set whether a thread can yield for GC
-    @description 
     @param tp Thread object returned by #mprCreateThread. Set to NULL for the current thread.
     @param on Set to true to enable yielding
     @ingroup MprThread
@@ -10512,21 +10501,10 @@ PUBLIC void mprWriteToOsLog(cchar *msg, int level);
 #endif /* _h_MPR */
 
 /*
-    @copy   default
-
     Copyright (c) Embedthis Software. All Rights Reserved.
-
     This software is distributed under commercial and open source licenses.
     You may use the Embedthis Open Source license or you may acquire a
     commercial license from Embedthis Software. You agree to be fully bound
     by the terms of either license. Consult the LICENSE.md distributed with
     this software for full details and other copyrights.
-
-    Local variables:
-    tab-width: 4
-    c-basic-offset: 4
-    End:
-    vim: sw=4 ts=4 expandtab
-
-    @end
  */
